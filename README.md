@@ -1,4 +1,4 @@
 # photons
-Experimental Photon Mapper written in C++
+C++ Photon Mapper
 
 ![Example render](dragon-render.png)

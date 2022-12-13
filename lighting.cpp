@@ -1,7 +1,6 @@
 #include "lighting.h"
 
-Ray PointLight::RandomRay() const
-{
+Ray PointLight::RandomRay() const {
     // Generates random direction using spherical coordinates theta and phi
     Ray ray;
     ray.o = position;
@@ -19,8 +18,7 @@ Ray PointLight::RandomRay() const
     return ray;
 }
 
-float PointLight::PowerFalloff(const Point3f &worldPoint) const
-{
+float PointLight::PowerFalloff(const Point3f &worldPoint) const {
     // Geometric falloff for point lights is inversely proportional
     // to area of sphere at distance. See inverse square law: https://en.wikipedia.org/wiki/Inverse-square_law
     float dist = length(worldPoint - position);

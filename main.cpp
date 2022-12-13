@@ -3,6 +3,8 @@
 #include "ray.h"
 #include "scene.h"
 #include "shape.h"
+#include "mesh.h"
+#include "bvh.h"
 
 #include <stdlib.h>
 #include <iostream>
@@ -34,17 +36,22 @@ struct ColourRGBA8 {
 };
 
 struct Photon {
-    Photon() = default;
-    Photon(const Point3f &position, const Vector3f normal, const Vector3f &dir, const Vector3f &col, short flag = 0)
-        : pos(position), n(normal), w(dir), colour(col)
-    { }
-
-    Point3f pos; // collision point
-    Vector3f n; // normal at hit
-    Vector3f w; // direction
-    Vector3f colour;
+    SphericalDir<Fract16> n,w; // 8 bytes
+    Vec3<Fract16> pos; // collision point projected on the world Bounding Volume // 6 bytes
+    // HvColour<Fract16> colour;
+    Vector3f colour; // 12 bytes
 };
 
+Vec3<Fract16> UnprojectFromBounds(const Bounds3f &bounds, const Vector3f &v)
+{
+    Vector3f u = (v - bounds.v0) / (bounds.v1 - bounds.v0);
+    return Vec3<Fract16>{u.x,u.y,u.z};
+}
+
+Vector3f ProjectToBounds(const Bounds3f &bounds, float x, float y, float z)
+{
+    return lerp(bounds.v0, bounds.v1, Vector3f(x,y,z));
+}
 
 Vector3f ComputeAlbedo(const Scene *scene, const Material *material, const Hit &hit)
 {
@@ -138,7 +145,7 @@ Vector3f CosineSampleHemisphere()
 
 struct KDNode
 {
-    Bounds3f worldBound;
+    Bounds3f bounds;
 
     // data indices are sorted by their position along the split axis, this is a pointer
     // to the area within the higher level indices buffer
@@ -190,7 +197,10 @@ struct PhotonMap
     bool IsEmpty() const;
     void ComputeKDTree();
     void SavePhoton(const Photon& photon);
+    KDNode *ComputeKDTreeChild(Bounds3f nodeBounds, int start, int end);
     std::vector<Photon *> GatherPhotonsWithinRange(const Point3f &p, float r2) const;
+    void GatherPhotonsInSphere(std::vector<Photon*> &gathered, KDNode *node,
+                      const Point3f& p, float r2) const;
 };
 
 // Saves photon in large photon buffer
@@ -303,14 +313,11 @@ static const CMPLE photonCmpFuncs[3] = {
     reinterpret_cast<CMPLE const>(ComparePhotonOnZAxis)
 };
 
-KDNode *ComputeKDTreeChild(Bounds3f worldBound,
-                           Photon *data,
-                           ssize_t start, ssize_t end,
-                           unsigned int maxItemsPerNode)
+KDNode *PhotonMap::ComputeKDTreeChild(Bounds3f nodeBounds, int start, int end)
 {
     KDNode *node = new KDNode;
 
-    node->worldBound = worldBound;
+    node->bounds = nodeBounds;
     size_t size = (end - start) + 1;
 
     if (size > maxItemsPerNode) {
@@ -320,7 +327,7 @@ KDNode *ComputeKDTreeChild(Bounds3f worldBound,
 #else
         // split on largest dimension
         SplitAxis axis;
-        Vector3f dim = worldBound.Dim();
+        Vector3f dim = nodeBounds.Dim();
         if (dim.x >= dim.y && dim.x >= dim.z)
             axis = SPLIT_X;
         if (dim.y >= dim.x && dim.y >= dim.z)
@@ -336,19 +343,20 @@ KDNode *ComputeKDTreeChild(Bounds3f worldBound,
 
         // compute children bounding boxes
         Bounds3f bound1, bound2;
-        bound1 = bound2 = worldBound;
+        bound1 = bound2 = nodeBounds;
 
         const Photon *midPoint = &data[mid];
+        Vec3<Fract16> f = midPoint->pos;
+        Vector3f midPos = ProjectToBounds(worldBound, f.x, f.y, f.z);
 
-        bound1.v1[axis] = midPoint->pos[axis];
-        bound2.v0[axis] = midPoint->pos[axis];
+        bound1.v1[axis] = midPos[axis];
+        bound2.v0[axis] = midPos[axis];
 
         node->axis = axis;
+        node->splitDelta = (midPos[axis] - nodeBounds.v0[axis]);
 
-        node->splitDelta = (midPoint->pos[axis] - worldBound.v0[axis]);
-
-        node->child1 = ComputeKDTreeChild(bound1, data, start, mid, maxItemsPerNode);
-        node->child2 = ComputeKDTreeChild(bound2, data, mid+1, end, maxItemsPerNode);
+        node->child1 = ComputeKDTreeChild(bound1, start, mid);
+        node->child2 = ComputeKDTreeChild(bound2, mid+1, end);
         node->isLeaf = false;
     } else {
         // this is a leaf node, set flags and item range
@@ -365,59 +373,54 @@ KDNode *ComputeKDTreeChild(Bounds3f worldBound,
 void PhotonMap::ComputeKDTree()
 {
     if (!IsEmpty()) {
-        root = ComputeKDTreeChild(worldBound, data, 0, numberOfItems-1, maxItemsPerNode);
+        root = ComputeKDTreeChild(worldBound, 0, numberOfItems-1);
     }
 }
 
 
 void
-GatherPhotonsInSphere(std::vector<Photon*> &gathered,
-                      Photon *data, KDNode *node,
-                      const Point3f& p, float r2)
+PhotonMap::GatherPhotonsInSphere(std::vector<Photon*> &gathered, KDNode *node,
+                                 const Point3f& p, float r2) const
 {
     // prune if bounding box distance to point greater than requested radius
-//    if (node->worldBound.Dist2(p) < r2)
 
-    if (!node->isLeaf) {
-        // parent node
-        float planeDist = p[node->axis] - (node->worldBound.v0[node->axis] + node->splitDelta);
+    if (!node->isLeaf) { // parent node
+        float planeDist = p[node->axis] - (node->bounds.v0[node->axis] + node->splitDelta);
 
-        if (planeDist < 0.0f) {
-            // search child1
-            GatherPhotonsInSphere(gathered, data, node->child1, p, r2);
+        if (planeDist < 0.0f) { // search child1
+            GatherPhotonsInSphere(gathered, node->child1, p, r2);
 
             // check if second node at least within radius
             if (planeDist * planeDist < r2) {
-                GatherPhotonsInSphere(gathered, data, node->child2, p, r2);
+                GatherPhotonsInSphere(gathered, node->child2, p, r2);
             }
-        } else {
-            // search child2
-            GatherPhotonsInSphere(gathered, data, node->child2, p, r2);
+        } else { // search child2
+            GatherPhotonsInSphere(gathered, node->child2, p, r2);
 
             // check if second node at least within radius
             if (planeDist * planeDist < r2) {
-                GatherPhotonsInSphere(gathered, data, node->child1, p, r2);
+                GatherPhotonsInSphere(gathered, node->child1, p, r2);
             }
         }
     } else {
         // leaf node, gather all points with distance less than radius
         uint64_t start = node->start, end = node->start + node->size-1;
         for (uint64_t i = start; i <= end; ++i) {
-            if (length2(data[i].pos - p) <= r2) {
+            auto pos = data[i].pos;
+            if (length2(ProjectToBounds(worldBound,pos.x,pos.y,pos.z) - p) <= r2) {
                 gathered.push_back(&data[i]);
             }
         }
     }
 }
 
-std::vector<Photon *>
-PhotonMap::GatherPhotonsWithinRange(const Point3f &p, float r2) const
+std::vector<Photon *> PhotonMap::GatherPhotonsWithinRange(const Point3f &p, float r2) const
 {
     std::vector<Photon *> photons;
 
     if (!IsEmpty()) {
-        if (root->worldBound.contains(p)) {
-            GatherPhotonsInSphere(photons, data, root, p, r2);
+        if (root->bounds.contains(p)) {
+            GatherPhotonsInSphere(photons, root, p, r2);
         }
     }
 
@@ -473,7 +476,9 @@ Vector3f SamplePhotonSphere(const Scene *scene, const PhotonMap *photonMap, cons
             const float k = 4.0f;
 
             for (const Photon *p : nearPhotons) {
-                float dp = length(hit.position - p->pos);
+                auto pos = p->pos;
+                auto worldPos = ProjectToBounds(photonMap->worldBound,pos.x,pos.y,pos.z);
+                float dp = length(hit.position - worldPos);
                 float wpc = 1.0f - dp/(k*r);
 
                 Vector3f Fr = (p->colour);// / M_PI;//* Max(0.0f, dot(p->w, hit.normal));
@@ -647,7 +652,9 @@ void PhotonMapper::Prepass() {
                     scatteredRay.t1 = 0.0005f;
 
                     colour *= albedo / M_PI;
-                    mGlobalMap->SavePhoton(Photon(hit.position, hit.normal, scatteredRay.d, colour));
+
+                    Vec3<Fract16> pos = UnprojectFromBounds(mGlobalMap->worldBound, hit.position);
+                    mGlobalMap->SavePhoton(Photon{hit.normal, scatteredRay.d, pos, colour});
                     ray = scatteredRay;
                 }
 
@@ -730,7 +737,8 @@ void PhotonMapper::Prepass() {
                     } else {
                         // diffuse surface hit, exit loop
                         if (hitRefractive) {
-                            mCausticsMap->SavePhoton(Photon(hit.position, hit.normal, -ray.d, colour));
+                            Vec3<Fract16> pos = UnprojectFromBounds(mGlobalMap->worldBound, hit.position);
+                            mCausticsMap->SavePhoton(Photon{hit.normal, -ray.d, pos, colour});
                         }
 
                         break;
@@ -860,7 +868,6 @@ void PhotonMapper::RenderPixel(Frame *frame, const Camera *camera,
                             }
 
                         }
-
 
                         auto ao = ComputeAmbientOcclusion(mScene, material, hit);
                         auto albedo = ComputeAlbedo(mScene, material, hit);
@@ -1009,7 +1016,7 @@ void AsyncRenderer::Render(Frame *frame, const Camera *camera, unsigned int thre
 
     // wait for all jobs to be finished
     while (finishedJobs < jobs.size()) {
-        this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 
     for (auto &thread: threads) {
@@ -1050,16 +1057,14 @@ void render(Camera *camera, Scene *scene, uint32_t width, uint32_t height)
     PhotonMapper photonMapper(scene, 8);
 
     PhotonMapperOptions options = {
-            PHOTON_MAPPER_FLAGS_DIRECT_LIGHTING_BIT
-            | PHOTON_MAPPER_FLAGS_INDIRECT_LIGHTING_BIT
-            | PHOTON_MAPPER_FLAGS_CAUSTICS_BIT
-            ,30000, // photon count
-            250000, // caustic photon count
-            8, // max number of bounces
-            32, // samples per pixel
-            80, // final gather samples
-            0, // direct illumination samples (ni)
-            0.08f, // radius squared
+            PHOTON_MAPPER_FLAGS_DIRECT_LIGHTING_BIT|PHOTON_MAPPER_FLAGS_INDIRECT_LIGHTING_BIT|PHOTON_MAPPER_FLAGS_CAUSTICS_BIT,
+            200000, // photon count
+            0, // caustic photon count
+            6, // max number of bounces
+            4, // samples per pixel
+            8, // final gather samples
+            8, // direct illumination samples (ni)
+            0.05f, // radius squared
             0.0025f, // radius squared for caustics
             2.4f // gamma
     };
@@ -1067,7 +1072,7 @@ void render(Camera *camera, Scene *scene, uint32_t width, uint32_t height)
     photonMapper.SetOptions(options);
 
     AsyncRenderer renderer(&photonMapper, 64, 64);
-    renderer.Render(frame, camera);
+    renderer.Render(frame, camera, 8);
 
     {
         // Write the frame out to output folder with unique timestamp
@@ -1076,7 +1081,7 @@ void render(Camera *camera, Scene *scene, uint32_t width, uint32_t height)
         struct tm timeinfo;
         localtime_s(&timeinfo, &now);
 
-        sprintf(filename, "./output/frame-%d-%d-%d.%d-%d-%d.png",
+        sprintf(filename, "../output/frame-%d-%d-%d.%d-%d-%d.png",
                 timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
                 timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
 
@@ -1091,11 +1096,18 @@ void render(Camera *camera, Scene *scene, uint32_t width, uint32_t height)
 
 int main(int argc, char *argv[])
 {
-    //    uint32_t width = 3840, height = 2160;
-    uint32_t width = 2048, height = 2048;
+    BvhTree dragon_bvh;
+    ply_mesh dragon;
+    const char *mesh_path = "../data/stanford_dragon_vrip_decimated.ply";
+    load_ply_mesh(dragon, mesh_path);
+    printf("Building BVH tree for mesh \"%s\"...\n", mesh_path);
+    dragon_bvh.BuildBvh(dragon);
+    printf("Built BVH tree for mesh \"%s\"\n", mesh_path);
+
+    uint32_t width = 2000, height = 2000;
     float aspect = (float)width/(float)height;
 
-    Camera camera = Camera(Point3f (1.64f, -4.41f, 1.32f), Point3f(0.0f, 0.0f, 1.0f), aspect, 90.0f);
+    Camera camera = Camera(Point3f(0.64f, 1.41f, 2.32f), Point3f(0.0f, 0.0f, 0.0f), aspect, 90.0f);
 
     // setup scene
     Scene scene;
@@ -1107,39 +1119,42 @@ int main(int argc, char *argv[])
             1.0f,
             false);
 
-    {
-        Texture albedo;
-        if (albedo.LoadFromFile("./data/TexturesCom_SoilSand0092_1_seamless_S.jpg")) {
-            int textureId = scene.AddTexture(albedo);
-            sandMaterial.albedoTexture.Set(textureId);
-            sandMaterial.albedoTexture.filter = SamplerFilter::Bilinear;
-            sandMaterial.albedoTexture.wrap = SamplerWrap::Repeat;
-        } else {
-            printf("Failed to load texture!\n");
-        }
-    }
+    scene.AddPrimitive(new MeshInstance(&dragon_bvh,Transform(Vector3f{0.0f,0.0f,0.0f})),
+        Material(Vector3f(1.0f, 1.0f, 1.0f), 0.0f, 1.0f, 1.0f));
 
-    scene.AddPrimitive(Sphere(Vector3f(0.0f, -1.0f, 2.75f), 1.0f),
-                       sandMaterial);
+    // {
+    //     Texture albedo;
+    //     if (albedo.LoadFromFile("../data/TexturesCom_SoilSand0092_1_seamless_S.jpg")) {
+    //         int textureId = scene.AddTexture(albedo);
+    //         sandMaterial.albedoTexture.Set(textureId);
+    //         sandMaterial.albedoTexture.filter = SamplerFilter::Bilinear;
+    //         sandMaterial.albedoTexture.wrap = SamplerWrap::Repeat;
+    //     } else {
+    //         printf("Failed to load texture!\n");
+    //     }
+    // }
 
-    scene.AddPrimitive(Sphere(Vector3f(1.0f, -1.0f, 1.0f), 1.0f),
-                       Material(Vector3f(1.0f, 0.0f, 0.0f), 0.0f, 1.0f, 1.0f));
+    // scene.AddPrimitive(Sphere(Vector3f(0.0f, -1.0f, 2.75f), 1.0f),
+    //                    sandMaterial);
 
-    scene.AddPrimitive(Sphere(Vector3f(-1.0f, -1.0f, 1.0f), 1.0f),
-                       Material(Vector3f(1.0f, 1.0f, 1.0f), 0.0f, 1.0f, 1.0f));
+    // scene.AddPrimitive(Sphere(Vector3f(1.0f, -1.0f, 1.0f), 1.0f),
+    //                    Material(Vector3f(1.0f, 0.0f, 0.0f), 0.0f, 1.0f, 1.0f));
 
-    scene.AddPrimitive(Sphere(Vector3f(0.35f, -2.74f, 0.82f), 0.44f),
+    // scene.AddPrimitive(Sphere(Vector3f(-1.0f, -1.0f, 1.0f), 1.0f),
+    //                    Material(Vector3f(1.0f, 1.0f, 1.0f), 0.0f, 1.0f, 1.0f));
+
+    scene.AddPrimitive(new Sphere(Vector3f(0.35f, 0.82f, 0.82f), 0.44f),
                        Material(Vector3f(1.0f, 1.0f, 1.0f), 0.5f, 1.0f, 1.5f, true));
 
 
-    scene.AddPrimitive(Disk(Vector3f(0.0f, 0.0f, 0.0f),Vector3f(0.0f, 0.0f, 1.0f), 10.0f),
+    scene.AddPrimitive(new Disk(Vector3f(0.0f, 0.0f, 0.0f),Vector3f(0.0f, 1.0f, 0.0f), 10.0f),
                        Material(Vector3f(1.0f, 1.0f, 1.0f), 0.0f, 1.0f, 1.0f));
+    
 
+    // scene.AddPrimitive(Disk(Vector3f(0.0f, 0.0f, 0.0f),Vector3f(0.0f, -1.0f, 0.0f), 10.0f),
+    //                    Material(Vector3f(1.0f, 1.0f, 1.0f), 0.0f, 1.0f, 1.0f));
 
-    scene.AddPrimitive(Disk(Vector3f(0.0f, 0.0f, 0.0f),Vector3f(0.0f, -1.0f, 0.0f), 10.0f),
-                       Material(Vector3f(1.0f, 1.0f, 1.0f), 0.0f, 1.0f, 1.0f));
-
-    scene.AddPointLight(PointLight(Vector3f(0.73f, -3.5f, 3.8f),
+    scene.AddPointLight(PointLight(Vector3f(0.73f, 3.5f, 3.8f),
                                    Vector3f(1.0f), 150.0f ));
 
 

@@ -34,8 +34,7 @@ struct Scene {
     const Material *GetMaterial(int id) const;
     int AddMaterial(Material m);
 
-    void AddPrimitive(const Sphere &sphere, const Material &m);
-    void AddPrimitive(const Disk &disk, const Material &m);
+    void AddPrimitive(Shape *shape, const Material &m);
     void AddPointLight(const PointLight &light);
 
 

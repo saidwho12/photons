@@ -23,6 +23,7 @@ enum ShapeType : uint32_t {
     SHAPE_TYPE_TRIANGLE_MESH = 0x00000010,
     SHAPE_TYPE_AXIS_ALIGNED_BOUNDING_BOX = 0x00000020,
     SHAPE_TYPE_ORIENTED_BOUNDING_BOX = 0x00000040,
+    SHAPE_TYPE_BVH_TRIANGLE_MESH = 0x00000080,
 };
 
 // Abstract shape class provides interface for intersection, bounding volume computation, and more

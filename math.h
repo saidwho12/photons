@@ -81,7 +81,7 @@ struct Vector3f {
         return {x / len, y / len, z / len};
     }
 
-    float dot(Vector3f &other) {
+    float dot(const Vector3f &other)const {
         return x*other.x + y*other.y + z*other.z;
     }
 
@@ -223,7 +223,7 @@ static Vector3f refract(const Vector3f &v, const Vector3f &n, const float eta) {
     return R;
 }
 
-static const Vector3f GLOBAL_UP = Vector3f(0.0f, 0.0f, 1.0f);
+static const Vector3f GLOBAL_UP = Vector3f(0.0f, 1.0f, 0.0f);
 
 struct Vector4f {
     union {
@@ -263,6 +263,11 @@ static float lerp(float a, float b, float t)
     return (1.0f - t) * a + t * b;
 }
 
+static Vector3f lerp(Vector3f a, Vector3f b, Vector3f t)
+{
+    return (1.0f - t) * a + t * b;
+}
+
 static Vector4f lerp(Vector4f a, Vector4f b, Vector4f t)
 {
     return (1.0f - t) * a + t * b;
@@ -292,7 +297,6 @@ static uint64_t RandInt()
 
 // For smaller input rangers like audio tick or 0-1 UVs use these...
 #define HASHSCALE1 443.8975f
-
 
 static float RandFloat(float p)
 {
@@ -378,5 +382,68 @@ struct Bounds3f {
         Vector3f b = (v1-v0)*0.5f;
         Vector3f q = Vector3f(fabsf(v.x), fabsf(v.y), fabsf(v.z)) - b;
         return length2(Max(q,0.0f)) + Min(Max(q.x,Max(q.y,q.z)),0.0f);
+    }
+};
+
+static Vector3f V3Max(const Vector3f& a, const Vector3f& b) {
+    return Vector3f{std::max(a.x,b.x),std::max(a.y,b.y),std::max(a.z,b.z)};
+}
+static Vector3f V3Min(const Vector3f& a, const Vector3f& b) {
+    return Vector3f{std::min(a.x,b.x),std::min(a.y,b.y),std::min(a.z,b.z)};
+}
+
+static float sign(float const& val) {
+    return val < 0.0f ? -1.0f : (val > 0.0f ? +1.0f : 0.0f);
+}
+
+class Fract16 {
+    public:
+    Fract16() {}
+    Fract16(float const& val) {
+        _u16 = static_cast<uint16_t>(std::min(std::max(val,0.0f),1.0f) * UINT16_MAX);
+    }
+    operator float() const {
+        return static_cast<float>(_u16) / static_cast<float>(UINT16_MAX);
+    }
+    private:
+    uint16_t _u16;
+};
+
+template <typename Sclr> class SphericalDir {
+    private:
+    Sclr e,z;
+    public:
+    SphericalDir(float const& theta, float const& phi):
+        e(phi / M_PI),
+        z((theta + M_PI) / (2.0f * M_PI))
+    {}
+
+    SphericalDir(Vector3f const& vec) {
+        e = std::acos(vec.z / length(vec)) / M_PI;
+        float phi = std::atan2(vec.y, vec.x);
+        z = (phi + M_PI) / (2.0f * M_PI);
+    }
+    
+    inline Vector3f ToVector3f() const {
+        float theta = e * M_PI, phi = z * (2.0f * M_PI);
+        return Vector3f(
+            std::sin(phi)*std::cos(theta),
+            std::sin(phi)*std::sin(theta),
+            std::cos(phi)
+        );
+    }
+};
+
+template <typename Sclr> struct HvColour {
+    Sclr hue, val;
+};
+
+template <typename Sclr> struct Vec3 {
+    Sclr x,y,z;
+    inline Sclr& operator[](size_t i) {
+        return reinterpret_cast<Sclr*>(&x)[i];
+    }
+    const inline Sclr& operator[](size_t i) const {
+        return reinterpret_cast<const Sclr*>(&x)[i];
     }
 };

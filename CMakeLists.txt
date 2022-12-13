@@ -4,6 +4,8 @@ project(photons-cmake C CXX)
 
 add_executable(photons
         camera.h
+        bvh.h
+        bvh.cpp
         main.cpp
         shape.h
         shape.cpp
@@ -26,7 +28,7 @@ if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif ()
 
 if (CMAKE_BUILD_TYPE STREQUAL "Release")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Ofast -O3 -ftree-vectorize -march=native")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math -Ofast -O3 -ftree-vectorize -march=native")
 elseif (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Og")
 endif()

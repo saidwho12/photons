@@ -40,16 +40,8 @@ int Scene::AddMaterial(Material m)
     return id;
 }
 
-void Scene::AddPrimitive(const Sphere& sphere, const Material &m)
+void Scene::AddPrimitive(Shape *shape, const Material &m)
 {
-    auto *shape = dynamic_cast<Shape*>(new Sphere(sphere));
-    int matid = AddMaterial(m);
-    primitives.emplace_back(std::shared_ptr<Shape>(shape), matid );
-}
-
-void Scene::AddPrimitive(const Disk& disk, const Material& m)
-{
-    auto *shape = dynamic_cast<Shape*>(new Disk(disk));
     int matid = AddMaterial(m);
     primitives.emplace_back(std::shared_ptr<Shape>(shape), matid );
 }
